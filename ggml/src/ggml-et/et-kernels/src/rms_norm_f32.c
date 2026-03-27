@@ -17,8 +17,6 @@ struct ggml_et_rms_norm_params {
     float eps;                // Epsilon parameter for numerical stability
 };
 
-KERNEL_TRAMPOLINE();
-
 int entry_point(struct ggml_et_rms_norm_params* params, void* env) {
     kernel_environment_t* kernel_env = (kernel_environment_t*)env;
 
@@ -84,39 +82,35 @@ int entry_point(struct ggml_et_rms_norm_params* params, void* env) {
             float* dst_ptr = (float*)((char*)dst_data + i3*nb3 + i2*nb2 + i1*nb1);
 
             // Step 1: Compute sum of squares for this row using 8-wide vectors
-            float sum = 0.0f;
+            // ne0 is guaranteed to be a multiple of 16 (cache-aligned)
 
-            // Process 8 elements at a time using vector instructions
-            int32_t vec_end = (int32_t)((ne0 / 8) * 8);
-            if (vec_end > 0) {
-                float acc_vec[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            // Zero the accumulator register
+            float zero = 0.0f;
+            __asm__ volatile("fbc.ps f10, %[z]\n" : : [z] "m"(zero) : "f10");
 
-                for (int32_t i0 = 0; i0 < vec_end; i0 += 8) {
-                    // Use vector operations to compute x*x and accumulate
-                    __asm__ volatile(
-                        "flw.ps f10, %[acc]\n"              // Load current accumulator (8 floats)
-                        "flw.ps f11, %[x_vec]\n"            // Load 8 input values
-                        "fmadd.ps f10, f11, f11, f10\n"     // acc += x * x (fused multiply-add)
-                        "fsw.ps f10, %[result]\n"           // Store back to accumulator
-
-                        : [result] "=m"(*(float(*)[8])acc_vec)
-                        : [acc] "m"(*(const float(*)[8])acc_vec),
-                          [x_vec] "m"(*(const float(*)[8])&src_ptr[i0])
-                        : "f10", "f11"
-                    );
-                }
-
-                // Sum the 8 accumulated values
-                for (int i = 0; i < 8; i++) {
-                    sum += acc_vec[i];
-                }
+            for (int32_t i0 = 0; i0 < (int32_t)ne0; i0 += 8) {
+                __asm__ volatile(
+                    "flw.ps f11, %[x_vec]\n"            // Load 8 input values
+                    "fmadd.ps f10, f11, f11, f10\n"     // acc += x * x (fused multiply-add)
+                    :
+                    : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0])
+                    : "f10", "f11"
+                );
             }
 
-            // Handle remaining elements (< 8) with scalar operations
-            for (int32_t i0 = vec_end; i0 < (int32_t)ne0; i0++) {
-                const float x = src_ptr[i0];
-                sum += x * x;
-            }
+            // Horizontal sum of 8 accumulated values in f10
+            float sum;
+            __asm__ __volatile__(
+                "fswizz.ps f1, f10, 0xB1 \n\t"         // Swaps: e0<->e1 and e2<->e3
+                "fadd.ps   f2, f10, f1, rne \n\t"
+                "fswizz.ps f3, f2, 0x4E \n\t"           // Swaps: e0,e1 <-> e2,e3
+                "fadd.ps   f4, f2, f3, rne \n\t"
+                "fmvz.x.ps t0, f4, 4 \n\t"              // Move upper 128b half to scalar
+                "fbcx.ps   f5, t0 \n\t"                  // Broadcast to vector
+                "fadd.ps   %[vout], f4, f5, rne \n\t"
+                : [vout] "=f" (sum)
+                :: "t0", "f1", "f2", "f3", "f4", "f5"
+            );
 
             // Step 2: Compute mean of squares and scale factor
             const float mean = et_fdiv(sum, (float)(int32_t)ne0);
@@ -128,11 +122,7 @@ int entry_point(struct ggml_et_rms_norm_params* params, void* env) {
             }
 
             // Step 3: Apply scaling using 8-wide vectors
-            // This approach works for both in-place and regular operations
-
-            // Process 8 elements at a time using vector multiplication
-            for (int32_t i0 = 0; i0 < vec_end; i0 += 8) {
-                // Use vector operations to scale 8 elements at once
+            for (int32_t i0 = 0; i0 < (int32_t)ne0; i0 += 8) {
                 __asm__ volatile(
                     "flw.ps f12, %[x_vec]\n"            // Load 8 input values
                     "fbc.ps f13, %[scale_ptr]\n"        // Broadcast scale to all 8 elements
@@ -144,11 +134,6 @@ int entry_point(struct ggml_et_rms_norm_params* params, void* env) {
                       [scale_ptr] "m"(scale)
                     : "f12", "f13", "f14"
                 );
-            }
-
-            // Handle remaining elements (< 8) with scalar operations
-            for (int32_t i0 = vec_end; i0 < (int32_t)ne0; i0++) {
-                dst_ptr[i0] = src_ptr[i0] * scale;
             }
             }
         }

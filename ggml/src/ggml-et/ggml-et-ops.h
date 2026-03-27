@@ -6,6 +6,7 @@
 
 // Performance logging macros for ET ops
 // Logs in machine-parseable pipe-delimited format: ET_PERF|field=value|...
+#ifdef ET_PERF_RECORD
 #define ET_PERF_START() int64_t _et_perf_start = ggml_time_us()
 
 #define ET_PERF_END(op_name, kernel_name, node) do { \
@@ -25,6 +26,13 @@
         (node)->ne[0], (node)->ne[1], (node)->ne[2], (node)->ne[3], \
         _et_perf_start, _et_perf_end, ##__VA_ARGS__); \
 } while(0)
+#else
+
+#define ET_PERF_START() do {} while(0)
+#define ET_PERF_END_EXT(op_name, kernel_name, node, fmt, ...) do {(void)(node); } while(0)
+#define ET_PERF_END(op_name, kernel_name, node) do {(void)(node);} while(0)
+
+#endif
 
 struct ggml_et_binary_params {
     ggml_tensor src0;
@@ -103,6 +111,13 @@ struct ggml_et_set_rows_params {
     ggml_tensor dst;      // F32/F16 destination tensor
 };
 
+struct ggml_et_rms_norm_mul_params {
+    ggml_tensor src0;      // F32 input tensor (to be normalized)
+    ggml_tensor src1;      // F32 weights tensor (element-wise multiply)
+    ggml_tensor dst;       // F32 output tensor
+    float eps;             // Epsilon for numerical stability
+};
+
 struct ggml_et_mul_mat_id_params {
     ggml_tensor src0;     // Expert weight matrices (Q8_0/F16/F32) [K, M, n_expert]
     ggml_tensor src1;     // Activations (F32) [K, n_expert_used, batch]
@@ -110,8 +125,17 @@ struct ggml_et_mul_mat_id_params {
     ggml_tensor dst;      // Output (F32) [M, n_expert_used, batch, 1]
 };
 
+struct ggml_et_scale_params {
+    ggml_tensor src0;     // F32 input tensor
+    ggml_tensor dst;      // F32 output tensor
+    float scale;          // Scale factor
+    float bias;           // Bias (additive offset)
+};
+
+bool ggml_et_op_scale(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_mul(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_add(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_sub(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_mul_mat(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_mul_mat_id(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
@@ -122,3 +146,6 @@ bool ggml_et_op_get_rows(ggml_backend_et_device_context* dev_ctx, const ggml_ten
 bool ggml_et_op_set_rows(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_cont(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_elmap(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
+                             const ggml_tensor* rms_norm_node,
+                             const ggml_tensor* mul_node);
