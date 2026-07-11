@@ -635,6 +635,18 @@ static enum ggml_status ggml_backend_et_graph_compute(ggml_backend_t backend, gg
                 ggml_et_op_rms_norm(dev_ctx, node);
                 break;
 
+            case GGML_OP_NORM:
+                ggml_et_op_norm(dev_ctx, node);
+                break;
+
+            case GGML_OP_UNARY:
+                ggml_et_op_unary(dev_ctx, node);
+                break;
+
+            case GGML_OP_IM2COL:
+                ggml_et_op_im2col(dev_ctx, node);
+                break;
+
             case GGML_OP_SCALE:
                 ggml_et_op_scale(dev_ctx, node);
                 break;
@@ -792,6 +804,30 @@ static bool ggml_backend_et_device_supports_op(ggml_backend_dev_t dev, const ggm
                        op->ne[0] % 16 == 0 &&
                        ggml_is_contiguous(op) &&
                        ggml_is_contiguous(op->src[0]);
+            break;
+        case GGML_OP_NORM:
+            supported = op->type == GGML_TYPE_F32 &&
+                       op->src[0] && op->src[0]->type == GGML_TYPE_F32 &&
+                       op->ne[0] % 16 == 0 &&
+                       ggml_is_contiguous(op) &&
+                       ggml_is_contiguous(op->src[0]);
+            break;
+        case GGML_OP_UNARY:
+            supported = op->type == GGML_TYPE_F32 &&
+                       op->src[0] && op->src[0]->type == GGML_TYPE_F32 &&
+                       ggml_get_unary_op(op) == GGML_UNARY_OP_GELU &&
+                       ggml_nelements(op) % 16 == 0 &&
+                       ggml_is_contiguous(op) &&
+                       ggml_is_contiguous(op->src[0]);
+            break;
+        case GGML_OP_IM2COL:
+            supported = op->type == GGML_TYPE_F32 &&
+                       op->src[0] &&
+                       op->src[1] && op->src[1]->type == GGML_TYPE_F32 &&
+                       ((const int32_t *) op->op_params)[6] == 1 &&
+                       ggml_nelements(op) % 16 == 0 &&
+                       ggml_is_contiguous(op) &&
+                       ggml_is_contiguous(op->src[1]);
             break;
         case GGML_OP_SCALE:
             // F32 contiguous, total elements must be cache line aligned (16 floats)

@@ -77,6 +77,31 @@ struct ggml_et_rms_norm_params {
     float eps;         // Epsilon parameter for numerical stability
 };
 
+struct ggml_et_norm_params {
+    ggml_tensor src0;
+    ggml_tensor dst;
+    float eps;
+};
+
+struct ggml_et_unary_params {
+    ggml_tensor src0;
+    ggml_tensor dst;
+    int32_t unary_op;
+};
+
+struct ggml_et_im2col_params {
+    ggml_tensor src0;
+    ggml_tensor src1;
+    ggml_tensor dst;
+    int32_t s0;
+    int32_t s1;
+    int32_t p0;
+    int32_t p1;
+    int32_t d0;
+    int32_t d1;
+    int32_t is_2d;
+};
+
 struct ggml_et_glu_params {
     ggml_tensor src0;     // F32 input tensor A (or combined tensor if src1 is null)
     ggml_tensor src1;     // F32 input tensor B (null for single tensor mode)
@@ -140,6 +165,9 @@ bool ggml_et_op_mul_mat(ggml_backend_et_device_context* dev_ctx, const ggml_tens
 bool ggml_et_op_mul_mat_id(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_rms_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_unary(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_im2col(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_glu(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_softmax(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_get_rows(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);

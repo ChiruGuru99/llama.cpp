@@ -658,6 +658,100 @@ bool ggml_et_op_rms_norm(ggml_backend_et_device_context* dev_ctx, const ggml_ten
     return kernel_result;
 }
 
+bool ggml_et_op_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
+    ET_PERF_START();
+
+    if (!dev_ctx || !node || !node->src[0]) {
+        GGML_LOG_ERROR("ET: NORM operation missing required input\n");
+        return false;
+    }
+    if (node->type != GGML_TYPE_F32 || node->src[0]->type != GGML_TYPE_F32) {
+        GGML_LOG_ERROR("ET: NORM operation only supports F32\n");
+        return false;
+    }
+
+    float eps;
+    memcpy(&eps, node->op_params, sizeof(eps));
+
+    ggml_et_norm_params params;
+    params.src0 = *node->src[0];
+    params.dst = *node;
+    params.eps = eps;
+
+    const bool result = ggml_et_launch_kernel(
+        dev_ctx, "norm_f32", &params, sizeof(params), 0xFFFFFFFF);
+    ET_PERF_END_EXT("NORM", "norm_f32", node, "eps=%.6f", (double) eps);
+    return result;
+}
+
+bool ggml_et_op_unary(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
+    ET_PERF_START();
+
+    if (!dev_ctx || !node || !node->src[0]) {
+        GGML_LOG_ERROR("ET: UNARY operation missing required input\n");
+        return false;
+    }
+    if (node->type != GGML_TYPE_F32 || node->src[0]->type != GGML_TYPE_F32) {
+        GGML_LOG_ERROR("ET: UNARY operation only supports F32\n");
+        return false;
+    }
+
+    const ggml_unary_op unary_op = ggml_get_unary_op(node);
+    if (unary_op != GGML_UNARY_OP_GELU) {
+        GGML_LOG_ERROR("ET: unsupported UNARY operation: %s\n", ggml_unary_op_name(unary_op));
+        return false;
+    }
+
+    ggml_et_unary_params params;
+    params.src0 = *node->src[0];
+    params.dst = *node;
+    params.unary_op = (int32_t) unary_op;
+
+    const bool result = ggml_et_launch_kernel(
+        dev_ctx, "unary_f32", &params, sizeof(params), 0xFFFFFFFF);
+    ET_PERF_END_EXT("UNARY", "unary_f32", node, "unary_op=%s", ggml_unary_op_name(unary_op));
+    return result;
+}
+
+bool ggml_et_op_im2col(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
+    ET_PERF_START();
+
+    if (!dev_ctx || !node || !node->src[0] || !node->src[1]) {
+        GGML_LOG_ERROR("ET: IM2COL operation missing required input\n");
+        return false;
+    }
+    if (node->type != GGML_TYPE_F32 || node->src[1]->type != GGML_TYPE_F32) {
+        GGML_LOG_ERROR("ET: IM2COL operation only supports F32 image and output\n");
+        return false;
+    }
+
+    const int32_t * op = (const int32_t *) node->op_params;
+    if (op[6] != 1) {
+        GGML_LOG_ERROR("ET: IM2COL operation only supports 2D inputs\n");
+        return false;
+    }
+
+    ggml_et_im2col_params params;
+    params.src0 = *node->src[0];
+    params.src1 = *node->src[1];
+    params.dst = *node;
+    params.s0 = op[0];
+    params.s1 = op[1];
+    params.p0 = op[2];
+    params.p1 = op[3];
+    params.d0 = op[4];
+    params.d1 = op[5];
+    params.is_2d = op[6];
+
+    const bool result = ggml_et_launch_kernel(
+        dev_ctx, "im2col_f32", &params, sizeof(params), 0xFFFFFFFF);
+    ET_PERF_END_EXT(
+        "IM2COL", "im2col_f32", node,
+        "stride=[%d,%d]|padding=[%d,%d]|dilation=[%d,%d]",
+        op[0], op[1], op[2], op[3], op[4], op[5]);
+    return result;
+}
+
 bool ggml_et_op_softmax(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
     ET_PERF_START();
 
