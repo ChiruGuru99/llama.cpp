@@ -501,9 +501,7 @@ int entry_point(struct ggml_et_binary_params* params, void* env) {
             // line is 16 consecutive m. Requires M and the dst base/stride to be
             // 64B aligned; anything else falls back to the flattened atomic path.
             const int64_t M_blocks = M >> 4;  // 16 f32 = 64B cache line
-            const bool aligned =
-                (M >= 16) && ((M & 15) == 0) &&
-                (((uintptr_t)dst_ptr2 & 63) == 0) && ((nbd1 & 63) == 0);
+            const bool aligned = false;
 
             if (aligned) {
                 const int64_t total_cls = M_blocks * N;
