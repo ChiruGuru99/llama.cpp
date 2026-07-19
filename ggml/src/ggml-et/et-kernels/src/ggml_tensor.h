@@ -197,6 +197,18 @@ struct ggml_tensor {
     char padding[8];                              // Padding for alignment
 };
 
+// True if tensor is contiguous in memory for the given element size (bytes).
+static inline int ggml_tensor_is_contiguous(const struct ggml_tensor * t, int type_size) {
+    int64_t expected = type_size;
+    for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        if (t->ne[i] > 1 && (int64_t) t->nb[i] != expected) {
+            return 0;
+        }
+        expected *= t->ne[i];
+    }
+    return 1;
+}
+
 // Binary operation parameters (for MUL, ADD, etc.)
 struct ggml_et_binary_params {
     struct ggml_tensor src0;
