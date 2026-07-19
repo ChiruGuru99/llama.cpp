@@ -216,6 +216,132 @@ static inline void dot_row_q8_0_x4(const block_q8_0* q_row,
     );
     *out0 = s0; *out1 = s1; *out2 = s2; *out3 = s3;
 }
+static inline void dot_row_q8_0_2x4(const block_q8_0* q_row0, const block_q8_0* q_row1,
+                                    const float* b0, const float* b1,
+                                    const float* b2, const float* b3,
+                                    int64_t K_blocks,
+                                    float* out00, float* out01, float* out02, float* out03,
+                                    float* out10, float* out11, float* out12, float* out13) {
+    static const int32_t gather_bytes[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    static const int32_t gather_zero[8]  = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    float s00, s01, s02, s03, s10, s11, s12, s13;
+    unsigned long saved_mask;
+    const block_q8_0* a0 = q_row0;
+    const block_q8_0* a1 = q_row1;
+    const float *p0 = b0, *p1 = b1, *p2 = b2, *p3 = b3;
+    int64_t cnt = K_blocks;
+    const int8_t *qs0, *qs1;
+
+    __asm__ __volatile__(
+        "mova.x.m %[savem]\n"
+        "mov.m.x  m0, x0, 0xFF\n"
+        "flw.ps   f31, (%[gb])\n"
+        "flw.ps   f30, (%[gz])\n"
+        "fbci.pi  f16, 0\n"                   // vacc00
+        "fbci.pi  f17, 0\n"                   // vacc01
+        "fbci.pi  f18, 0\n"                   // vacc02
+        "fbci.pi  f19, 0\n"                   // vacc03
+        "fbci.pi  f20, 0\n"                   // vacc10
+        "fbci.pi  f21, 0\n"                   // vacc11
+        "fbci.pi  f22, 0\n"                   // vacc12
+        "fbci.pi  f23, 0\n"                   // vacc13
+        "beqz     %[cnt], 2f\n"
+    "1:\n"
+        "fbci.pi  f24, 0\n"                   // part00
+        "fbci.pi  f25, 0\n"                   // part01
+        "fbci.pi  f26, 0\n"                   // part02
+        "fbci.pi  f27, 0\n"                   // part03
+        "fbci.pi  f4, 0\n"                    // part10
+        "fbci.pi  f5, 0\n"                    // part11
+        "fbci.pi  %[s12], 0\n"                // part12
+        "fbci.pi  %[s13], 0\n"                // part13
+        "addi     %[qs0], %[a0], 2\n"
+        "addi     %[qs1], %[a1], 2\n"
+        // chunk 0
+        "fgb.ps   f11, f31(%[qs0])\n" "fcvt.ps.pw f11, f11\n"
+        "fgb.ps   f13, f31(%[qs1])\n" "fcvt.ps.pw f13, f13\n"
+        "flw.ps   f12, 0(%[p0])\n" "fmadd.ps f24, f11, f12, f24\n" "fmadd.ps f4, f13, f12, f4\n"
+        "flw.ps   f12, 0(%[p1])\n" "fmadd.ps f25, f11, f12, f25\n" "fmadd.ps f5, f13, f12, f5\n"
+        "flw.ps   f12, 0(%[p2])\n" "fmadd.ps f26, f11, f12, f26\n" "fmadd.ps %[s12], f13, f12, %[s12]\n"
+        "flw.ps   f12, 0(%[p3])\n" "fmadd.ps f27, f11, f12, f27\n" "fmadd.ps %[s13], f13, f12, %[s13]\n"
+        "addi     %[qs0], %[qs0], 8\n"
+        "addi     %[qs1], %[qs1], 8\n"
+        // chunk 1
+        "fgb.ps   f11, f31(%[qs0])\n" "fcvt.ps.pw f11, f11\n"
+        "fgb.ps   f13, f31(%[qs1])\n" "fcvt.ps.pw f13, f13\n"
+        "flw.ps   f12, 32(%[p0])\n" "fmadd.ps f24, f11, f12, f24\n" "fmadd.ps f4, f13, f12, f4\n"
+        "flw.ps   f12, 32(%[p1])\n" "fmadd.ps f25, f11, f12, f25\n" "fmadd.ps f5, f13, f12, f5\n"
+        "flw.ps   f12, 32(%[p2])\n" "fmadd.ps f26, f11, f12, f26\n" "fmadd.ps %[s12], f13, f12, %[s12]\n"
+        "flw.ps   f12, 32(%[p3])\n" "fmadd.ps f27, f11, f12, f27\n" "fmadd.ps %[s13], f13, f12, %[s13]\n"
+        "addi     %[qs0], %[qs0], 8\n"
+        "addi     %[qs1], %[qs1], 8\n"
+        // chunk 2
+        "fgb.ps   f11, f31(%[qs0])\n" "fcvt.ps.pw f11, f11\n"
+        "fgb.ps   f13, f31(%[qs1])\n" "fcvt.ps.pw f13, f13\n"
+        "flw.ps   f12, 64(%[p0])\n" "fmadd.ps f24, f11, f12, f24\n" "fmadd.ps f4, f13, f12, f4\n"
+        "flw.ps   f12, 64(%[p1])\n" "fmadd.ps f25, f11, f12, f25\n" "fmadd.ps f5, f13, f12, f5\n"
+        "flw.ps   f12, 64(%[p2])\n" "fmadd.ps f26, f11, f12, f26\n" "fmadd.ps %[s12], f13, f12, %[s12]\n"
+        "flw.ps   f12, 64(%[p3])\n" "fmadd.ps f27, f11, f12, f27\n" "fmadd.ps %[s13], f13, f12, %[s13]\n"
+        "addi     %[qs0], %[qs0], 8\n"
+        "addi     %[qs1], %[qs1], 8\n"
+        // chunk 3
+        "fgb.ps   f11, f31(%[qs0])\n" "fcvt.ps.pw f11, f11\n"
+        "fgb.ps   f13, f31(%[qs1])\n" "fcvt.ps.pw f13, f13\n"
+        "flw.ps   f12, 96(%[p0])\n" "fmadd.ps f24, f11, f12, f24\n" "fmadd.ps f4, f13, f12, f4\n"
+        "flw.ps   f12, 96(%[p1])\n" "fmadd.ps f25, f11, f12, f25\n" "fmadd.ps f5, f13, f12, f5\n"
+        "flw.ps   f12, 96(%[p2])\n" "fmadd.ps f26, f11, f12, f26\n" "fmadd.ps %[s12], f13, f12, %[s12]\n"
+        "flw.ps   f12, 96(%[p3])\n" "fmadd.ps f27, f11, f12, f27\n" "fmadd.ps %[s13], f13, f12, %[s13]\n"
+        // scales
+        "fgh.ps   f14, f30(%[a0])\n" "fcvt.ps.f16 f14, f14\n"
+        "fgh.ps   f15, f30(%[a1])\n" "fcvt.ps.f16 f15, f15\n"
+        "fmul.ps  f24, f24, f14\n" "fadd.ps f16, f16, f24, rne\n"
+        "fmul.ps  f25, f25, f14\n" "fadd.ps f17, f17, f25, rne\n"
+        "fmul.ps  f26, f26, f14\n" "fadd.ps f18, f18, f26, rne\n"
+        "fmul.ps  f27, f27, f14\n" "fadd.ps f19, f19, f27, rne\n"
+        "fmul.ps  f4, f4, f15\n"   "fadd.ps f20, f20, f4, rne\n"
+        "fmul.ps  f5, f5, f15\n"   "fadd.ps f21, f21, f5, rne\n"
+        "fmul.ps  %[s12], %[s12], f15\n"   "fadd.ps f22, f22, %[s12], rne\n"
+        "fmul.ps  %[s13], %[s13], f15\n"   "fadd.ps f23, f23, %[s13], rne\n"
+        // advance pointers
+        "addi     %[a0], %[a0], 34\n"
+        "addi     %[a1], %[a1], 34\n"
+        "addi     %[p0], %[p0], 128\n"
+        "addi     %[p1], %[p1], 128\n"
+        "addi     %[p2], %[p2], 128\n"
+        "addi     %[p3], %[p3], 128\n"
+        "addi     %[cnt], %[cnt], -1\n"
+        "bnez     %[cnt], 1b\n"
+    "2:\n"
+        // horizontal reduce
+        "fswizz.ps f1, f16, 0xB1\n" "fadd.ps f2, f16, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s00], f4, f5, rne\n"
+        "fswizz.ps f1, f17, 0xB1\n" "fadd.ps f2, f17, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s01], f4, f5, rne\n"
+        "fswizz.ps f1, f18, 0xB1\n" "fadd.ps f2, f18, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s02], f4, f5, rne\n"
+        "fswizz.ps f1, f19, 0xB1\n" "fadd.ps f2, f19, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s03], f4, f5, rne\n"
+
+        "fswizz.ps f1, f20, 0xB1\n" "fadd.ps f2, f20, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s10], f4, f5, rne\n"
+        "fswizz.ps f1, f21, 0xB1\n" "fadd.ps f2, f21, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s11], f4, f5, rne\n"
+        "fswizz.ps f1, f22, 0xB1\n" "fadd.ps f2, f22, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s12], f4, f5, rne\n"
+        "fswizz.ps f1, f23, 0xB1\n" "fadd.ps f2, f23, f1, rne\n" "fswizz.ps f3, f2, 0x4E\n" "fadd.ps f4, f2, f3, rne\n" "fmvz.x.ps t0, f4, 4\n" "fbcx.ps f5, t0\n" "fadd.ps %[s13], f4, f5, rne\n"
+        "mova.m.x %[savem]\n"
+        : [s00] "=f"(s00), [s01] "=f"(s01), [s02] "=f"(s02), [s03] "=f"(s03),
+          [s10] "=f"(s10), [s11] "=f"(s11), [s12] "=&f"(s12), [s13] "=&f"(s13),
+          [savem] "=&r"(saved_mask),
+          [a0] "+r"(a0), [a1] "+r"(a1), [p0] "+r"(p0), [p1] "+r"(p1), [p2] "+r"(p2), [p3] "+r"(p3),
+          [cnt] "+r"(cnt), [qs0] "=&r"(qs0), [qs1] "=&r"(qs1)
+        : [gb] "r"(gather_bytes), [gz] "r"(gather_zero)
+        : "memory", "t0",
+          "f1", "f2", "f3", "f4", "f5",
+          "f11", "f12", "f13", "f14", "f15",
+          "f16", "f17", "f18", "f19",
+          "f20", "f21", "f22", "f23",
+          "f24", "f25", "f26", "f27",
+          "f30", "f31"
+    );
+    *out00 = s00; *out01 = s01; *out02 = s02; *out03 = s03;
+    *out10 = s10; *out11 = s11; *out12 = s12; *out13 = s13;
+}
+
 #endif // ET_Q8_0_USE_GENERIC_DOT
 
 // Using the block prefetch logic
@@ -518,37 +644,97 @@ int entry_point(struct ggml_et_binary_params* params, void* env) {
                     }
                 }
             } else {
-                // Unaligned fallback: 4-column batched distribution + per-element atomics.
-                const int64_t n_groups = (N + 3) / 4;
-                const int64_t total_work = M * n_groups;
+                if (N >= 16 && M >= 768 && (M % 2 == 0) && K_blocks <= 96) {
+                    // Unaligned fallback: 2x4 batched distribution (2 Q8 rows x 4 F32 cols).
+                    const int64_t n_groups = (N + 3) / 4;
+                    const int64_t m_groups = M / 2;
+                    const int64_t total_work = m_groups * n_groups;
 
-                for (int64_t work = (int64_t)hart_id; work < total_work; work += stride_m) {
-                    const int64_t group = work / M;
-                    const int64_t m = work % M;
-                    const int64_t first_n = group * 4;
+                    for (int64_t work = (int64_t)hart_id; work < total_work; work += stride_m) {
+                        const int64_t group = work / m_groups;
+                        const int64_t m_idx = work % m_groups;
+                        const int64_t m = m_idx * 2;
+                        const int64_t first_n = group * 4;
 
-                    const block_q8_0* q_row = (const block_q8_0*)(src0_ptr2 + m * nb01);
+                        const block_q8_0* q_row0 = (const block_q8_0*)(src0_ptr2 + m * nb01);
+                        const block_q8_0* q_row1 = (const block_q8_0*)(src0_ptr2 + (m + 1) * nb01);
 
-                    if (first_n + 3 < N) {
-                        const float* b0 = (const float*)(src1_ptr2 + (first_n + 0) * nb11);
-                        const float* b1 = (const float*)(src1_ptr2 + (first_n + 1) * nb11);
-                        const float* b2 = (const float*)(src1_ptr2 + (first_n + 2) * nb11);
-                        const float* b3 = (const float*)(src1_ptr2 + (first_n + 3) * nb11);
+                        if (first_n + 3 < N) {
+                            const float* b0 = (const float*)(src1_ptr2 + (first_n + 0) * nb11);
+                            const float* b1 = (const float*)(src1_ptr2 + (first_n + 1) * nb11);
+                            const float* b2 = (const float*)(src1_ptr2 + (first_n + 2) * nb11);
+                            const float* b3 = (const float*)(src1_ptr2 + (first_n + 3) * nb11);
 
-                        float out0, out1, out2, out3;
-                        dot_row_q8_0_x4(q_row, b0, b1, b2, b3, K_blocks, &out0, &out1, &out2, &out3);
+                            float out00, out01, out02, out03;
+                            float out10, out11, out12, out13;
+                            dot_row_q8_0_2x4(q_row0, q_row1, b0, b1, b2, b3, K_blocks,
+                                             &out00, &out01, &out02, &out03,
+                                             &out10, &out11, &out12, &out13);
 
-                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 0) * nbd1 + m * sizeof(float)), out0);
-                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 1) * nbd1 + m * sizeof(float)), out1);
-                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 2) * nbd1 + m * sizeof(float)), out2);
-                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 3) * nbd1 + m * sizeof(float)), out3);
-                    } else {
-                        for (int64_t n = first_n; n < N; n++) {
-                            const float* b_col = (const float*)(src1_ptr2 + n * nb11);
-                            float sum = dot_row_q8_0(q_row, b_col, K_blocks);
-                            float* dst_entry = (float*)(dst_ptr2 + n * nbd1 + m * sizeof(float));
-                            atomic_store_f32((volatile float*)dst_entry, sum);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 0) * nbd1 + m * sizeof(float)), out00);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 1) * nbd1 + m * sizeof(float)), out01);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 2) * nbd1 + m * sizeof(float)), out02);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 3) * nbd1 + m * sizeof(float)), out03);
+
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 0) * nbd1 + (m + 1) * sizeof(float)), out10);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 1) * nbd1 + (m + 1) * sizeof(float)), out11);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 2) * nbd1 + (m + 1) * sizeof(float)), out12);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 3) * nbd1 + (m + 1) * sizeof(float)), out13);
+                        } else {
+                            for (int64_t n = first_n; n < N; n++) {
+                                const float* b_col = (const float*)(src1_ptr2 + n * nb11);
+                                float sum0 = dot_row_q8_0(q_row0, b_col, K_blocks);
+                                float sum1 = dot_row_q8_0(q_row1, b_col, K_blocks);
+                                atomic_store_f32((volatile float*)(dst_ptr2 + n * nbd1 + m * sizeof(float)), sum0);
+                                atomic_store_f32((volatile float*)(dst_ptr2 + n * nbd1 + (m + 1) * sizeof(float)), sum1);
+                            }
                         }
+                    }
+                } else if (N >= 16 && M >= 768 && K_blocks <= 96) {
+                    // Unaligned fallback: 4-column batched distribution + per-element atomics.
+                    const int64_t n_groups = (N + 3) / 4;
+                    const int64_t total_work = M * n_groups;
+
+                    for (int64_t work = (int64_t)hart_id; work < total_work; work += stride_m) {
+                        const int64_t group = work / M;
+                        const int64_t m = work % M;
+                        const int64_t first_n = group * 4;
+
+                        const block_q8_0* q_row = (const block_q8_0*)(src0_ptr2 + m * nb01);
+
+                        if (first_n + 3 < N) {
+                            const float* b0 = (const float*)(src1_ptr2 + (first_n + 0) * nb11);
+                            const float* b1 = (const float*)(src1_ptr2 + (first_n + 1) * nb11);
+                            const float* b2 = (const float*)(src1_ptr2 + (first_n + 2) * nb11);
+                            const float* b3 = (const float*)(src1_ptr2 + (first_n + 3) * nb11);
+
+                            float out0, out1, out2, out3;
+                            dot_row_q8_0_x4(q_row, b0, b1, b2, b3, K_blocks, &out0, &out1, &out2, &out3);
+
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 0) * nbd1 + m * sizeof(float)), out0);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 1) * nbd1 + m * sizeof(float)), out1);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 2) * nbd1 + m * sizeof(float)), out2);
+                            atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 3) * nbd1 + m * sizeof(float)), out3);
+                        } else {
+                            for (int64_t n = first_n; n < N; n++) {
+                                const float* b_col = (const float*)(src1_ptr2 + n * nb11);
+                                float sum = dot_row_q8_0(q_row, b_col, K_blocks);
+                                float* dst_entry = (float*)(dst_ptr2 + n * nbd1 + m * sizeof(float));
+                                atomic_store_f32((volatile float*)dst_entry, sum);
+                            }
+                        }
+                    }
+                } else {
+                    // Unaligned fallback: flattened distribution + per-element atomics.
+                    const int64_t MN = M * N;
+                    for (int64_t idx = (int64_t)hart_id; idx < MN; idx += stride_m) {
+                        const int64_t n = idx / M;
+                        const int64_t m = idx - n * M;
+                        const float* b_col_base = (const float*)(src1_ptr2 + n * nb11);
+                        const block_q8_0* q_row = (const block_q8_0*)(src0_ptr2 + m * nb01);
+                        float sum = dot_row_q8_0(q_row, b_col_base, K_blocks);
+                        float* dst_entry = (float*)(dst_ptr2 + n * nbd1 + m * sizeof(float));
+                        atomic_store_f32((volatile float*)dst_entry, sum);
                     }
                 }
             }
