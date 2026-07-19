@@ -15,6 +15,30 @@
 #define SOC_MINIONS_PER_SHIRE 32
 #define NUM_HARTS_PER_MINION 2
 
+// Cache-line helpers (ported from et-perf-debug) — needed by el_map_f32.c's
+// cache-line-aligned broadcast/add store path.
+#define ET_CACHE_LINE_SIZE_BYTES 64
+
+static inline int64_t et_gcd_i64(int64_t a, int64_t b) {
+    while (b) {
+        const int64_t t = b;
+        b               = a % b;
+        a               = t;
+    }
+    return a;
+}
+
+// Number of consecutive rows of width row_elems whose combined write footprint
+// spans an integer number of cache lines (so stores don't share a line).
+static inline int64_t et_rows_per_cacheline_group(int64_t row_elems, int64_t elem_size_bytes) {
+    if (row_elems <= 0 || elem_size_bytes <= 0) {
+        return 1;
+    }
+    const int64_t row_bytes = row_elems * elem_size_bytes;
+    const int64_t gcd       = et_gcd_i64(ET_CACHE_LINE_SIZE_BYTES, row_bytes);
+    return ET_CACHE_LINE_SIZE_BYTES / gcd;
+}
+
 // Environment structure definition
 typedef struct {
     uint32_t version;           // Version of the ABI (offset 0)
@@ -218,13 +242,26 @@ static inline void atomic_store_f16(volatile uint16_t* addr, uint16_t value) {
 // dead code. Purely additive: no existing name above is touched.
 //******************************************************************************
 
+#ifndef SHIRE_MASTER
+#define SHIRE_MASTER 32  // matches etsoc/isa/esr_defines.h
+#endif
+
 typedef enum {
     ET_BARRIER_MINION,  // sync both harts within each minion (FLB=minion_id, FCC 0)
+    ET_BARRIER_SHIRE,   // sync all harts across the shire   (FLB=0, FCC 1)
 } et_barrier_scope_t;
 
 // Barrier with scope-derived parameters. Returns 1 if this hart was last to arrive.
+// SHIRE scope ported from et-perf-debug: master shire has 16 minions (32 harts,
+// upper mask), the rest 32 minions (64 harts). FLB 0 / FCC 1 for shire-wide, kept
+// disjoint from the minion path's FLB=minion_id / FCC 0.
 static inline uint64_t __attribute__((always_inline)) et_barrier(et_barrier_scope_t scope) {
-    (void) scope;  // only ET_BARRIER_MINION exists/is passed
+    if (scope == ET_BARRIER_SHIRE) {
+        uint64_t shire_id     = get_shire_id();
+        uint32_t thread_count = (shire_id == SHIRE_MASTER) ? 32 : 64;
+        uint32_t mask         = (shire_id == SHIRE_MASTER) ? 0xFFFF0000U : 0xFFFFFFFFU;
+        return shire_barrier(0, 1, thread_count, mask, mask);
+    }
     uint32_t local_minion = (get_hart_id() >> 1) & 0x1F;
     uint32_t mask         = 1u << local_minion;
     return shire_barrier(local_minion, 0, 2, mask, mask);
