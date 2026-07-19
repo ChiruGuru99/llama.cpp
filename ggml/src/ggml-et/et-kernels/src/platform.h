@@ -209,13 +209,13 @@ static inline void atomic_store_f16(volatile uint16_t* addr, uint16_t value) {
 }
 
 //******************************************************************************
-// Barrier & L2-SCP-signaling primitives — rehan-version-1 addition, ported
-// from et-perf-debug, needed by mul_mat_Q8_0_matrix_engine.c's cross-hart
-// K-split reuse path. Trimmed to exactly what that kernel calls: only
-// ET_BARRIER_MINION is ever used (no SHIRE/GLOBAL scope, no sem_post/wait,
-// no global-AMO barrier) — the fuller et-perf-debug version supports scopes
-// this port doesn't need, so they're left out rather than carried as dead
-// code. Purely additive: no existing name above is touched.
+// Barrier & L2-SCP-signaling primitives - rehan-v1 addition, ported from
+// et-perf-debug, needed by mul_mat_Q8_0_matrix_engine.c's cross-hart K-split
+// reuse path and mul_mat_Q8_0.c's dual-hart K-split. Trimmed to exactly what
+// those kernels call: only ET_BARRIER_MINION is ever used (no SHIRE/GLOBAL
+// scope, no global-AMO barrier) - the fuller et-perf-debug version supports
+// scopes this port doesn't need, so they're left out rather than carried as
+// dead code. Purely additive: no existing name above is touched.
 //******************************************************************************
 
 typedef enum {
@@ -228,6 +228,40 @@ static inline uint64_t __attribute__((always_inline)) et_barrier(et_barrier_scop
     uint32_t local_minion = (get_hart_id() >> 1) & 0x1F;
     uint32_t mask         = 1u << local_minion;
     return shire_barrier(local_minion, 0, 2, mask, mask);
+}
+
+// One-way semaphore between harts (non-blocking post, blocking wait).
+//
+// et_sem_post(): increment the partner hart's semaphore. Non-blocking, the
+// caller continues immediately. Multiple posts accumulate.
+// et_sem_wait(): block until the semaphore is non-zero, then decrement it.
+//
+// Backed by hardware FCC (Flow Control Credit) counters, FCC 0 for
+// ET_BARRIER_MINION scope. Counters are per-hart private, so both harts can
+// post/wait on the same scope independently.
+//
+// Must not be mixed with et_barrier() of the same scope in the same kernel
+// (shared FCC channel).
+static inline void __attribute__((always_inline)) et_sem_post(et_barrier_scope_t scope) {
+    if (scope == ET_BARRIER_MINION) {
+        uint64_t hart_id      = get_hart_id();
+        uint32_t local_minion = (hart_id >> 1) & 0x1F;
+        uint32_t mask         = 1u << local_minion;
+        uint64_t shire_id     = get_shire_id();
+
+        if (hart_id & 1) {
+            fcc_send(shire_id, THREAD_0, FCC_0, mask);
+        } else {
+            fcc_send(shire_id, THREAD_1, FCC_0, mask);
+        }
+    }
+}
+
+// Block until a post from et_sem_post() is available, then consume it.
+static inline void __attribute__((always_inline)) et_sem_wait(et_barrier_scope_t scope) {
+    if (scope == ET_BARRIER_MINION) {
+        fcc_consume(FCC_0);
+    }
 }
 
 //******************************************************************************
@@ -289,6 +323,45 @@ static inline void __attribute__((always_inline)) evict_to_l2(const void * addr,
         :
         : [x31] "r"(x31_val), [val] "r"(csr_val)
         : "x31", "memory");
+}
+
+// Evict nlines cache lines at stride apart starting at addr from BOTH L1
+// and L2. Uses EvictVA (CSR 0x89F) with dest=10 (L3/DRAM), unlike evict_to_l2
+// above (dest=01, L2 only). Needed because both L1 and L2 are incoherent on
+// ET-SoC-1 (L2 is per-shire). Caller must FENCE before and WAIT_CACHEOPS
+// after. NOTE: nlines is encoded in a 4-bit field (max 16). DO NOT pass
+// nlines > 16 - use evict_region_past_l2() below for larger regions.
+static inline void __attribute__((always_inline)) evict_past_l2(const void * addr, uint64_t nlines, uint64_t stride) {
+    uint64_t csr_val = (0x2ULL << 58) | ((uint64_t) addr & 0xFFFFFFFFFFC0ULL) | ((nlines - 1) & 0xF);
+    uint64_t x31_val = stride & 0xFFFFFFFFFFC0ULL;
+
+    __asm__ __volatile__(
+        "mv x31, %[x31]\n"
+        "csrw 0x89F, %[val]\n"
+        :
+        : [x31] "r"(x31_val), [val] "r"(csr_val)
+        : "x31", "memory");
+}
+
+// Evict a contiguous region from both L1 and L2 so subsequent loads fetch
+// from L3/DRAM. Handles regions larger than the 16-line hardware limit by
+// issuing multiple evict_past_l2 calls.
+static void evict_region_past_l2(const void * addr, size_t bytes) {
+    if (!addr || bytes == 0) {
+        return;
+    }
+
+    const uint64_t CL     = 64;
+    uint64_t       base   = (uint64_t) addr & ~(CL - 1);
+    uint64_t       end    = ((uint64_t) addr + bytes + CL - 1) & ~(CL - 1);
+    uint64_t       nlines = (end - base) / CL;
+    for (uint64_t off = 0; off < nlines; off += 16) {
+        uint64_t batch = nlines - off;
+        if (batch > 16) {
+            batch = 16;
+        }
+        evict_past_l2((const void *) (base + off * CL), batch, CL);
+    }
 }
 
 //******************************************************************************
