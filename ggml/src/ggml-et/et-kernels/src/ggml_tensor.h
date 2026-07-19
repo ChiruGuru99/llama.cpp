@@ -204,6 +204,14 @@ struct ggml_et_binary_params {
     struct ggml_tensor dst;
 };
 
+// bias.data == NULL -> unfused MUL_MAT; otherwise dst = mat_mul(...) + bias.
+struct ggml_et_mm_q8_params {
+    struct ggml_tensor src0;
+    struct ggml_tensor src1;
+    struct ggml_tensor dst;
+    struct ggml_tensor bias;
+};
+
 // MUL_MAT_ID operation parameters (Mixture of Experts)
 struct ggml_et_mul_mat_id_params {
     struct ggml_tensor src0;  // Expert weight matrices [K, M, n_expert]

@@ -144,6 +144,14 @@ ger values in the vector register file.
 */
 #define TENSOR_LOAD_WAIT_0 0
 
+// rehan-version-1 addition: only the two opcode/transform values
+// mul_mat_Q8_0_matrix_engine.c actually passes (tensor_fma's FP32xFP32 mode,
+// tensor_load's plain 64B-row transform - the latter is also what
+// tensor_load()'s existing fixed 64B address mask already assumes, so no
+// change to tensor_load() itself is needed).
+#define TENSOR_FMA_OP_FP32 0  // TensorFMA32: FP32 x FP32 -> FP32
+#define TENSOR_LOAD_PLAIN  0  // TensorLoad: 64B rows
+
 /*! \def TENSOR_LOAD_WAIT_1
     \brief Tensor load to L1 Scratchpad with ID = 1 is complete.
 */
