@@ -518,16 +518,38 @@ int entry_point(struct ggml_et_binary_params* params, void* env) {
                     }
                 }
             } else {
-                // Unaligned fallback: flattened distribution + per-element atomics.
-                const int64_t MN = M * N;
-                for (int64_t idx = (int64_t)hart_id; idx < MN; idx += stride_m) {
-                    const int64_t n = idx / M;
-                    const int64_t m = idx - n * M;
-                    const float* b_col_base = (const float*)(src1_ptr2 + n * nb11);
+                // Unaligned fallback: 4-column batched distribution + per-element atomics.
+                const int64_t n_groups = (N + 3) / 4;
+                const int64_t total_work = M * n_groups;
+
+                for (int64_t work = (int64_t)hart_id; work < total_work; work += stride_m) {
+                    const int64_t group = work / M;
+                    const int64_t m = work % M;
+                    const int64_t first_n = group * 4;
+
                     const block_q8_0* q_row = (const block_q8_0*)(src0_ptr2 + m * nb01);
-                    float sum = dot_row_q8_0(q_row, b_col_base, K_blocks);
-                    float* dst_entry = (float*)(dst_ptr2 + n * nbd1 + m * sizeof(float));
-                    atomic_store_f32((volatile float*)dst_entry, sum);
+
+                    if (first_n + 3 < N) {
+                        const float* b0 = (const float*)(src1_ptr2 + (first_n + 0) * nb11);
+                        const float* b1 = (const float*)(src1_ptr2 + (first_n + 1) * nb11);
+                        const float* b2 = (const float*)(src1_ptr2 + (first_n + 2) * nb11);
+                        const float* b3 = (const float*)(src1_ptr2 + (first_n + 3) * nb11);
+
+                        float out0, out1, out2, out3;
+                        dot_row_q8_0_x4(q_row, b0, b1, b2, b3, K_blocks, &out0, &out1, &out2, &out3);
+
+                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 0) * nbd1 + m * sizeof(float)), out0);
+                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 1) * nbd1 + m * sizeof(float)), out1);
+                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 2) * nbd1 + m * sizeof(float)), out2);
+                        atomic_store_f32((volatile float*)(dst_ptr2 + (first_n + 3) * nbd1 + m * sizeof(float)), out3);
+                    } else {
+                        for (int64_t n = first_n; n < N; n++) {
+                            const float* b_col = (const float*)(src1_ptr2 + n * nb11);
+                            float sum = dot_row_q8_0(q_row, b_col, K_blocks);
+                            float* dst_entry = (float*)(dst_ptr2 + n * nbd1 + m * sizeof(float));
+                            atomic_store_f32((volatile float*)dst_entry, sum);
+                        }
+                    }
                 }
             }
 #endif
