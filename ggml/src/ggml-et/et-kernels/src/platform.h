@@ -430,4 +430,18 @@ scp_wait(volatile uint32_t *flag, uint32_t expected) {
     }
 }
 
+// Stage `nlines` cache lines starting at `addr` into L2 (stride in bytes
+// between lines), rather than letting them be re-fetched from DRAM on demand.
+static inline void __attribute__((always_inline))
+l2_prefetch(const void * addr, uint64_t nlines, uint64_t stride) {
+    uint64_t csr_val = (0x1ULL << 58) | ((uint64_t) addr & 0xFFFFFFFFFFC0ULL) | ((nlines - 1) & 0xF);
+
+    __asm__ __volatile__(
+        "mv    x31, %[stride]\n"
+        "csrw  0x81f, %[val]\n"
+        :
+        : [stride] "r"(stride & 0xFFFFFFFFFFC0ULL), [val] "r"(csr_val)
+        : "x31", "memory");
+}
+
 #endif // PLATFORM_H
