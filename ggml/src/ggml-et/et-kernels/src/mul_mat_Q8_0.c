@@ -69,7 +69,7 @@ int entry_point(struct ggml_et_mm_q8_params * params, void * env) {
     const int     is_hart1              = hart_id & 1;
     const int64_t rows_per_minion       = (M + STRIDE_M_KSPLIT - 1) / STRIDE_M_KSPLIT;
     const int64_t k_half                = K_blocks / 2;
-    const int     use_ksplit_small_rows = (rows_per_minion <= 2) && (K_blocks >= KSPLIT_SMALL_ROWS_K_BLOCKS);
+    const int     use_ksplit_small_rows = (rows_per_minion <= 1) && (K_blocks >= KSPLIT_SMALL_ROWS_K_BLOCKS);
     /*
      * K-split when K is large enough to benefit, and either:
      *   - few rows (≤4): always safe, proven working
