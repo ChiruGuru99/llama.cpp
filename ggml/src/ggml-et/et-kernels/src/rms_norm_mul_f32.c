@@ -74,6 +74,109 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
         return -1; // Shape mismatch
     }
 
+    // Specialized two-hart path for one contiguous 2048-element row
+    if (ne0 == 2048 && ne1 == 1 && ne2 == 1 && ne3 == 1 &&
+        src1->ne[0] == 2048 && src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
+        nb00 == 4 && nb10 == 4 && nb0 == 4) {
+        if (thread_id >= 2) {
+            return 0;
+        }
+
+        const int is_hart1 = get_hart_id() & 1;
+        const int32_t start = is_hart1 ? 1024 : 0;
+        const float* src_ptr = src0_data + start;
+        const float* wgt_ptr = src1_data + start;
+        float* dst_ptr = dst_data + start;
+
+        const int64_t local_minion = (get_hart_id() >> 1) & 0x1F;
+        volatile float* l2scp_slot =
+            (volatile float*)et_shire_l2scp_local(local_minion * 64);
+
+        float zero = 0.0f;
+        __asm__ volatile("fbc.ps f10, %[z]\n" : : [z] "m"(zero) : "f10");
+
+        for (int32_t i0 = 0; i0 < 1024; i0 += 8) {
+            __asm__ volatile(
+                "flw.ps f11, %[x_vec]\n"
+                "fmadd.ps f10, f11, f11, f10\n"
+                :
+                : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0])
+                : "f10", "f11"
+            );
+        }
+
+        float partial;
+        __asm__ __volatile__(
+            "fswizz.ps f1, f10, 0xB1 \n\t"
+            "fadd.ps   f2, f10, f1, rne \n\t"
+            "fswizz.ps f3, f2, 0x4E \n\t"
+            "fadd.ps   f4, f2, f3, rne \n\t"
+            "fmvz.x.ps t0, f4, 4 \n\t"
+            "fbcx.ps   f5, t0 \n\t"
+            "fadd.ps   %[vout], f4, f5, rne \n\t"
+            : [vout] "=f" (partial)
+            :: "t0", "f1", "f2", "f3", "f4", "f5"
+        );
+
+        float scale;
+        if (is_hart1) {
+            *l2scp_slot = partial;
+            FENCE;
+            flush_to_l2((const void*)l2scp_slot, 1, 64);
+            WAIT_CACHEOPS;
+            et_sem_post(ET_BARRIER_MINION);
+            et_sem_wait(ET_BARRIER_MINION);
+
+            // Hart 0 replaced our partial with the scale. Discard the cached
+            // partial so this load fetches hart 0's updated value from L2 SCP.
+            FENCE;
+            evict_to_l2((const void*)l2scp_slot, 1, 64);
+            WAIT_CACHEOPS;
+            FENCE;
+            scale = *l2scp_slot;
+        } else {
+            et_sem_wait(ET_BARRIER_MINION);
+
+            // This slot may still contain the scale from a previous launch.
+            // Discard the local copy before reading hart 1's new partial.
+            FENCE;
+            evict_to_l2((const void*)l2scp_slot, 1, 64);
+            WAIT_CACHEOPS;
+            FENCE;
+
+            const float sum = partial + *l2scp_slot;
+            const float mean = et_fdiv(sum, 2048.0f);
+            scale = et_powf(mean + eps, -0.5f);
+            *l2scp_slot = scale;
+            FENCE;
+            flush_to_l2((const void*)l2scp_slot, 1, 64);
+            WAIT_CACHEOPS;
+            et_sem_post(ET_BARRIER_MINION);
+        }
+
+        if (!(scale > 0.0f)) {
+            return -1;
+        }
+
+        for (int32_t i0 = 0; i0 < 1024; i0 += 8) {
+            __asm__ volatile(
+                "flw.ps f12, %[x_vec]\n"
+                "fbc.ps f13, %[scale_ptr]\n"
+                "fmul.ps f14, f12, f13\n"
+                "flw.ps f15, %[w_vec]\n"
+                "fmul.ps f14, f14, f15\n"
+                "fsw.ps f14, %[result]\n"
+                : [result] "=m"(*(float(*)[8])&dst_ptr[i0])
+                : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0]),
+                  [scale_ptr] "m"(scale),
+                  [w_vec] "m"(*(const float(*)[8])&wgt_ptr[i0])
+                : "f12", "f13", "f14", "f15"
+            );
+        }
+
+        return 0;
+    }
+
     // RMS norm processes rows independently
     // Parallelize across rows using simple striding
     for (int64_t i3 = 0; i3 < ne3; i3++) {
