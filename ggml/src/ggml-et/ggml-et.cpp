@@ -580,6 +580,76 @@ static bool ggml_et_can_fuse(const struct ggml_cgraph * cgraph, int node_idx,
     return true;
 }
 
+static bool ggml_et_can_fuse_rope_set_rows(const struct ggml_cgraph * cgraph, int node_idx) {
+    if (!ggml_can_fuse_subgraph(cgraph, node_idx,
+            { GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS },
+            { node_idx + 2 })) {
+        return false;
+    }
+
+    const ggml_tensor * rope     = cgraph->nodes[node_idx];
+    const ggml_tensor * view     = cgraph->nodes[node_idx + 1];
+    const ggml_tensor * set_rows = cgraph->nodes[node_idx + 2];
+
+    // Verify the exact RoPE -> VIEW -> SET_ROWS data flow.
+    if (view->src[0] != rope ||
+        set_rows->src[0] != view) {
+        return false;
+    }
+
+    // First experiment: only Llama 3.2 K-cache RoPE [64, 8, n_tokens, 1].
+    if (!rope->src[0] || rope->src[0]->type != GGML_TYPE_F32 ||
+        rope->type != GGML_TYPE_F32 ||
+        !rope->src[1] || rope->src[1]->type != GGML_TYPE_I32) {
+        return false;
+    }
+
+    const int32_t * rope_params = (const int32_t *) rope->op_params;
+    const int32_t n_dims = rope_params[1];
+    const int32_t mode   = rope_params[2];
+
+    if (mode != 0 ||
+        n_dims != 64 ||
+        rope->ne[0] != 64 ||
+        rope->ne[1] != 8 ||
+        rope->ne[3] != 1 ||
+        !ggml_is_contiguous(rope->src[0]) ||
+        !ggml_is_contiguous(rope)) {
+        return false;
+    }
+
+    // VIEW flattens [64, 8, n_tokens, 1] to [512, n_tokens, 1, 1].
+    if (view->type != GGML_TYPE_F32 ||
+        !ggml_is_contiguous(view) ||
+        view->ne[0] != rope->ne[0] * rope->ne[1] ||
+        view->ne[1] != rope->ne[2] ||
+        view->ne[2] != rope->ne[3]) {
+        return false;
+    }
+
+    if (!set_rows->src[1] ||
+        !set_rows->src[2] ||
+        !set_rows->data ||
+        !set_rows->src[1]->data ||
+        set_rows->src[1]->type != GGML_TYPE_I64 ||
+        !ggml_is_contiguous(set_rows->src[1]) ||
+        (set_rows->type != GGML_TYPE_F16 && set_rows->type != GGML_TYPE_F32) ||
+        !ggml_is_contiguous_rows(set_rows) ||
+        set_rows->ne[0] != view->ne[0] ||
+        set_rows->src[1]->ne[0] != view->ne[1]) {
+        return false;
+    }
+
+    const size_t dst_element_size = set_rows->type == GGML_TYPE_F16 ? 2u : 4u;
+    const size_t expected_dst_row_stride = (size_t) view->ne[0] * dst_element_size;
+
+    if (set_rows->nb[1] != expected_dst_row_stride) {
+        return false;
+    }
+
+    return true;
+}
+
 static enum ggml_status ggml_backend_et_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_et_device_context * dev_ctx = (ggml_backend_et_device_context *)backend->device->context;
 
@@ -594,6 +664,19 @@ static enum ggml_status ggml_backend_et_graph_compute(ggml_backend_t backend, gg
         if (ggml_et_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             ggml_et_op_rms_norm_mul(dev_ctx, node, cgraph->nodes[i + 1]);
             i++;  // skip the MUL node
+            continue;
+        }
+
+        if (ggml_et_can_fuse_rope_set_rows(cgraph, i)) {
+            ggml_tensor * rope     = cgraph->nodes[i];
+            ggml_tensor * set_rows = cgraph->nodes[i + 2];
+
+            if (!ggml_et_op_rope_set_rows(dev_ctx, rope, set_rows)) {
+                GGML_LOG_ERROR("ET: Failed to launch fused RoPE + SET_ROWS operation");
+                return GGML_STATUS_FAILED;
+            }
+
+            i += 2;  // skip the metadata VIEW and standalone SET_ROWS dispatch
             continue;
         }
 

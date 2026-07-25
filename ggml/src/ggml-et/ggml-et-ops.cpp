@@ -540,7 +540,9 @@ bool ggml_et_op_mul_mat_id(ggml_backend_et_device_context* dev_ctx, const ggml_t
     return kernel_result;
 }
 
-bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
+static bool ggml_et_op_rope_impl(ggml_backend_et_device_context* dev_ctx,
+                                  const ggml_tensor* node,
+                                  const ggml_tensor* set_rows_node) {
     ET_PERF_START();
 
     if (!dev_ctx || !node) {
@@ -551,6 +553,39 @@ bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor*
     if (!node->src[0] || !node->src[1]) {
         GGML_LOG_ERROR("ET: ROPE operation missing required inputs\n");
         return false;
+    }
+
+    const bool fused_mode = set_rows_node != nullptr;
+    if (fused_mode) {
+        if (!set_rows_node->src[0] || !set_rows_node->src[1] || !set_rows_node->src[2]) {
+            GGML_LOG_ERROR("ET: Fused ROPE_SET_ROWS operation missing required SET_ROWS inputs\n");
+            return false;
+        }
+
+        if (!set_rows_node->data || !set_rows_node->src[1]->data) {
+            GGML_LOG_ERROR("ET: Fused ROPE_SET_ROWS operation requires non-null destination and indices data\n");
+            return false;
+        }
+
+        if (set_rows_node->src[0]->type != GGML_TYPE_F32 ||
+            set_rows_node->src[1]->type != GGML_TYPE_I64 ||
+            (set_rows_node->type != GGML_TYPE_F16 && set_rows_node->type != GGML_TYPE_F32)) {
+            GGML_LOG_ERROR("ET: Fused ROPE_SET_ROWS operation with unsupported types: dst=%s src0=%s src1=%s\n",
+                           ggml_type_name(set_rows_node->type),
+                           ggml_type_name(set_rows_node->src[0]->type),
+                           ggml_type_name(set_rows_node->src[1]->type));
+            return false;
+        }
+
+        if (!ggml_is_contiguous_rows(set_rows_node)) {
+            GGML_LOG_ERROR("ET: Fused ROPE_SET_ROWS operation requires contiguous-rows destination tensor\n");
+            return false;
+        }
+
+        if (!ggml_is_contiguous(set_rows_node->src[1])) {
+            GGML_LOG_ERROR("ET: Fused ROPE_SET_ROWS operation requires contiguous indices tensor\n");
+            return false;
+        }
     }
 
     const char* kernel_name;
@@ -564,7 +599,7 @@ bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor*
     }
 
     // Pack parameters - copy full tensor structures and op_params
-    ggml_et_rope_params params;
+    ggml_et_rope_params params = {};
     params.src0 = *node->src[0];                    // F32 input tensor
     params.src1 = *node->src[1];                    // I32 position tensor
     if (node->src[2]) {
@@ -591,10 +626,19 @@ bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor*
         memset(params.rope_params.sections, 0, sizeof(params.rope_params.sections));
     }
 
+    if (fused_mode) {
+        params.fused_dst_data       = set_rows_node->data;
+        params.fused_row_indices    = (const int64_t *) set_rows_node->src[1]->data;
+        params.fused_dst_row_stride = set_rows_node->nb[1];
+        params.fused_dst_row_count  = set_rows_node->ne[1];
+        params.fused_dst_type       = set_rows_node->type;
+        params.fused_mode           = 1;
+    }
+
     // Phase 1: Initialize CPU comparison context and copy source buffers (before ET kernel)
     ggml_et_cpu_compare_ctx cpu_cmp_ctx;
     bool cpu_comparison_active = false;
-    if (rope_cpu_compare_config.enabled) {
+    if (!fused_mode && rope_cpu_compare_config.enabled) {
         GGML_LOG_DEBUG("ET: Initializing CPU comparison for ROPE operation\n");
         if (ggml_et_cpu_compare_init_pre(&cpu_cmp_ctx, node, GGML_OP_ROPE)) {
             cpu_comparison_active = true;
@@ -613,10 +657,21 @@ bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor*
         ggml_et_cpu_compare_free(&cpu_cmp_ctx);
     }
 
-    ET_PERF_END_EXT("ROPE", kernel_name, node, "mode=0x%x|n_dims=%d|freq_base=%.2f|freq_scale=%.2f",
+    ET_PERF_END_EXT(fused_mode ? "ROPE_SET_ROWS" : "ROPE", kernel_name, node,
+                    "mode=0x%x|n_dims=%d|freq_base=%.2f|freq_scale=%.2f",
                     params.rope_params.mode, params.rope_params.n_dims,
                     (double)params.rope_params.freq_base, (double)params.rope_params.freq_scale);
     return kernel_result;
+}
+
+bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {
+    return ggml_et_op_rope_impl(dev_ctx, node, nullptr);
+}
+
+bool ggml_et_op_rope_set_rows(ggml_backend_et_device_context* dev_ctx,
+                              const ggml_tensor* rope_node,
+                              const ggml_tensor* set_rows_node) {
+    return ggml_et_op_rope_impl(dev_ctx, rope_node, set_rows_node);
 }
 
 bool ggml_et_op_rms_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {

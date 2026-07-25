@@ -79,6 +79,12 @@ struct ggml_et_rope_params {
     ggml_tensor src2;
     ggml_tensor dst;
     rope_params_t rope_params;
+    void* fused_dst_data;
+    const int64_t* fused_row_indices;
+    uint64_t fused_dst_row_stride;
+    int64_t fused_dst_row_count;
+    enum ggml_type fused_dst_type;
+    int32_t fused_mode;
 };
 
 struct ggml_et_rms_norm_params {
@@ -174,6 +180,9 @@ bool ggml_et_op_sub(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* 
 bool ggml_et_op_mul_mat(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_mul_mat_id(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_rope(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
+bool ggml_et_op_rope_set_rows(ggml_backend_et_device_context* dev_ctx,
+                              const ggml_tensor* rope_node,
+                              const ggml_tensor* set_rows_node);
 bool ggml_et_op_rms_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_norm(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);
 bool ggml_et_op_unary(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node);

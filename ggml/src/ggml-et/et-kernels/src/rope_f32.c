@@ -45,6 +45,12 @@ struct ggml_et_rope_params {
     struct ggml_tensor src2;  // F32 frequency factors (optional)
     struct ggml_tensor dst;   // F32 output tensor
     rope_params_t rope_params;
+    void* fused_dst_data;
+    const int64_t* fused_row_indices;
+    uint64_t fused_dst_row_stride;
+    int64_t fused_dst_row_count;
+    enum ggml_type fused_dst_type;
+    int32_t fused_mode;
 };
 
 //------------------------------------------------------------------------------
@@ -391,6 +397,7 @@ int entry_point(struct ggml_et_rope_params* params, void* env) {
     const float freq_base  = rope_params->freq_base;
     const float freq_scale = rope_params->freq_scale;
     const int32_t mode     = rope_params->mode;
+    const int fused_mode   = params->fused_mode != 0;
 
     if (n_dims <= 0 || n_dims > head_dim || (n_dims & 1) != 0) {
         return -1;
@@ -398,6 +405,30 @@ int entry_point(struct ggml_et_rope_params* params, void* env) {
 
     if (n_dims / 2 > MAX_ROPE_HALF_DIMS) {
         return -1;
+    }
+
+    uint64_t fused_dst_element_size = 0;
+    if (fused_mode) {
+        if (!params->fused_dst_data ||
+            !params->fused_row_indices ||
+            params->fused_dst_row_stride == 0 ||
+            params->fused_dst_row_count <= 0 ||
+            (params->fused_dst_type != GGML_TYPE_F16 &&
+             params->fused_dst_type != GGML_TYPE_F32) ||
+            batch != 1 ||
+            mode != 0) {
+            return -1;
+        }
+
+        fused_dst_element_size = params->fused_dst_type == GGML_TYPE_F16 ? 2 : 4;
+        const uint64_t flattened_elements_per_token =
+            (uint64_t)head_dim * (uint64_t)heads;
+        const uint64_t required_row_bytes =
+            flattened_elements_per_token * fused_dst_element_size;
+
+        if (required_row_bytes != params->fused_dst_row_stride) {
+            return -1;
+        }
     }
 
     float cos_cache[MAX_ROPE_HALF_DIMS];
@@ -448,12 +479,38 @@ int entry_point(struct ggml_et_rope_params* params, void* env) {
         const float* head_src = (const float*)((const char*)src0_data +
             b * src0->nb[3] + s * src0->nb[2] + h * src0->nb[1]);
 
-        float* head_dst = (float*)((char*)dst_data +
-            b * dst->nb[3] + s * dst->nb[2] + h * dst->nb[1]);
+        float* head_dst = NULL;
+        float* head_dst_f32 = NULL;
+        uint16_t* head_dst_f16 = NULL;
+
+        if (!fused_mode) {
+            head_dst = (float*)((char*)dst_data +
+                b * dst->nb[3] + s * dst->nb[2] + h * dst->nb[1]);
+            head_dst_f32 = head_dst;
+        } else {
+            const int64_t cache_row = params->fused_row_indices[s];
+            if (cache_row < 0 || cache_row >= params->fused_dst_row_count) {
+                return -1;
+            }
+
+            char* fused_head_dst = (char*)params->fused_dst_data +
+                (uint64_t)cache_row * params->fused_dst_row_stride +
+                (uint64_t)h * (uint64_t)head_dim * fused_dst_element_size;
+
+            if (params->fused_dst_type == GGML_TYPE_F32) {
+                head_dst_f32 = (float*)fused_head_dst;
+            } else {
+                head_dst_f16 = (uint16_t*)fused_head_dst;
+            }
+        }
 
         // preserve original behavior exactly
         for (int64_t d = n_dims; d < head_dim; ++d) {
-            head_dst[d] = head_src[d];
+            if (head_dst_f32) {
+                head_dst_f32[d] = head_src[d];
+            } else {
+                head_dst_f16[d] = fp32_to_fp16(head_src[d]);
+            }
         }
 
         if (is_neox) {
@@ -490,8 +547,16 @@ int entry_point(struct ggml_et_rope_params* params, void* env) {
                 const float x0 = head_src[dim_in_head];
                 const float x1 = head_src[dim_in_head + 1];
 
-                head_dst[dim_in_head]     = x0 * cos_cache[pair_idx] - x1 * sin_cache[pair_idx];
-                head_dst[dim_in_head + 1] = x0 * sin_cache[pair_idx] + x1 * cos_cache[pair_idx];
+                const float y0 = x0 * cos_cache[pair_idx] - x1 * sin_cache[pair_idx];
+                const float y1 = x0 * sin_cache[pair_idx] + x1 * cos_cache[pair_idx];
+
+                if (head_dst_f32) {
+                    head_dst_f32[dim_in_head]     = y0;
+                    head_dst_f32[dim_in_head + 1] = y1;
+                } else {
+                    head_dst_f16[dim_in_head]     = fp32_to_fp16(y0);
+                    head_dst_f16[dim_in_head + 1] = fp32_to_fp16(y1);
+                }
             }
         }
     }
