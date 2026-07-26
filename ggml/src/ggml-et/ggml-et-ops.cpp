@@ -84,9 +84,10 @@ static ggml_et_cpu_compare_config set_rows_cpu_compare_config = {
     /* .max_log_elements = */ 2048
 };
 
-bool ggml_et_op_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
-                             const ggml_tensor* rms_norm_node,
-                             const ggml_tensor* mul_node) {
+static bool ggml_et_op_rms_norm_mul_impl(ggml_backend_et_device_context* dev_ctx,
+                                          const ggml_tensor* rms_norm_node,
+                                          const ggml_tensor* mul_node,
+                                          const ggml_tensor* add_node) {
     ET_PERF_START();
 
     if (!dev_ctx || !rms_norm_node || !mul_node) {
@@ -108,20 +109,84 @@ bool ggml_et_op_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
         return false;
     }
 
+    const bool fused_add = add_node != nullptr;
+    if (fused_add) {
+        if (!add_node->src[0] || !add_node->src[1]) {
+            GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL missing required ADD inputs\n");
+            return false;
+        }
+
+        if (add_node->src[0]->type != GGML_TYPE_F32 ||
+            add_node->src[1]->type != GGML_TYPE_F32 ||
+            add_node->type != GGML_TYPE_F32) {
+            GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL requires F32 ADD tensors: dst=%s src0=%s src1=%s\n",
+                           ggml_type_name(add_node->type),
+                           ggml_type_name(add_node->src[0]->type),
+                           ggml_type_name(add_node->src[1]->type));
+            return false;
+        }
+
+        if (rms_norm_node->src[0] != add_node) {
+            GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL requires RMS_NORM input to be the ADD output\n");
+            return false;
+        }
+
+        for (int i = 0; i < 4; ++i) {
+            if (add_node->src[0]->ne[i] != add_node->src[1]->ne[i] ||
+                add_node->src[0]->ne[i] != add_node->ne[i]) {
+                GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL requires identical ADD input/output shapes\n");
+                return false;
+            }
+        }
+
+        if (!ggml_is_contiguous(add_node->src[0]) ||
+            !ggml_is_contiguous(add_node->src[1]) ||
+            !ggml_is_contiguous(add_node)) {
+            GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL requires contiguous ADD tensors\n");
+            return false;
+        }
+
+        if (add_node->ne[0] != 2048 || add_node->ne[1] != 1 ||
+            add_node->ne[2] != 1 || add_node->ne[3] != 1) {
+            GGML_LOG_ERROR("ET: Fused ADD_RMS_NORM_MUL only supports shape [2048,1,1,1]\n");
+            return false;
+        }
+    }
+
     float eps;
     memcpy(&eps, rms_norm_node->op_params, sizeof(float));
 
-    ggml_et_rms_norm_mul_params params;
-    params.src0 = *rms_norm_node->src[0];  // input to normalize
-    params.src1 = *weights;                // normalization weights
-    params.dst  = *mul_node;               // final output
-    params.eps  = eps;
+    ggml_et_rms_norm_mul_params params{};
+    params.src0      = fused_add ? *add_node->src[0] : *rms_norm_node->src[0];
+    params.src1      = *weights;
+    params.dst       = *mul_node;
+    params.eps       = eps;
+    params.fused_add = fused_add ? 1 : 0;
+
+    if (fused_add) {
+        params.add_src = *add_node->src[1];
+        params.add_dst = *add_node;
+    }
 
     bool kernel_result = ggml_et_launch_kernel(dev_ctx, "rms_norm_mul_f32",
                                 &params, sizeof(params), 0xFFFFFFFF);
 
-    ET_PERF_END_EXT("RMS_NORM_MUL", "rms_norm_mul_f32", mul_node, "eps=%.6f", (double)eps);
+    ET_PERF_END_EXT(fused_add ? "ADD_RMS_NORM_MUL" : "RMS_NORM_MUL",
+                    "rms_norm_mul_f32", mul_node, "eps=%.6f", (double)eps);
     return kernel_result;
+}
+
+bool ggml_et_op_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
+                             const ggml_tensor* rms_norm_node,
+                             const ggml_tensor* mul_node) {
+    return ggml_et_op_rms_norm_mul_impl(dev_ctx, rms_norm_node, mul_node, nullptr);
+}
+
+bool ggml_et_op_add_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
+                                 const ggml_tensor* add_node,
+                                 const ggml_tensor* rms_norm_node,
+                                 const ggml_tensor* mul_node) {
+    return ggml_et_op_rms_norm_mul_impl(dev_ctx, rms_norm_node, mul_node, add_node);
 }
 
 bool ggml_et_op_scale(ggml_backend_et_device_context* dev_ctx, const ggml_tensor* node) {

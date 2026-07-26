@@ -14,6 +14,9 @@ struct ggml_et_rms_norm_mul_params {
     struct ggml_tensor src1;  // F32 weights tensor (element-wise multiply)
     struct ggml_tensor dst;   // F32 output tensor
     float eps;                // Epsilon for numerical stability
+    struct ggml_tensor add_src;
+    struct ggml_tensor add_dst;
+    int32_t fused_add;
 };
 
 int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
@@ -37,7 +40,10 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
     struct ggml_tensor* src0 = &params->src0;
     struct ggml_tensor* src1 = &params->src1;
     struct ggml_tensor* dst = &params->dst;
+    struct ggml_tensor* add_src = &params->add_src;
+    struct ggml_tensor* add_dst = &params->add_dst;
     float eps = params->eps;
+    const int fused_add = params->fused_add != 0;
 
     if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         return -1; // Unsupported type combination
@@ -46,6 +52,8 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
     float* src0_data = (float*)src0->data;
     float* src1_data = (float*)src1->data;
     float* dst_data = (float*)dst->data;
+    float* add_src_data = 0;
+    float* add_dst_data = 0;
 
     if (!src0_data || !src1_data || !dst_data) {
         return -1; // Null data pointer
@@ -74,6 +82,33 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
         return -1; // Shape mismatch
     }
 
+    if (fused_add) {
+        if (add_src->type != GGML_TYPE_F32 || add_dst->type != GGML_TYPE_F32) {
+            return -1;
+        }
+
+        add_src_data = (float*)add_src->data;
+        add_dst_data = (float*)add_dst->data;
+        if (!add_src_data || !add_dst_data) {
+            return -1;
+        }
+
+        if (add_src->ne[0] != src0->ne[0] || add_src->ne[1] != src0->ne[1] ||
+            add_src->ne[2] != src0->ne[2] || add_src->ne[3] != src0->ne[3] ||
+            add_dst->ne[0] != dst->ne[0] || add_dst->ne[1] != dst->ne[1] ||
+            add_dst->ne[2] != dst->ne[2] || add_dst->ne[3] != dst->ne[3]) {
+            return -1;
+        }
+
+        if (add_src->nb[0] != 4 || add_dst->nb[0] != 4) {
+            return -1;
+        }
+
+        if (ne0 != 2048 || ne1 != 1 || ne2 != 1 || ne3 != 1) {
+            return -1;
+        }
+    }
+
     // Specialized two-hart path for one contiguous 2048-element row
     if (ne0 == 2048 && ne1 == 1 && ne2 == 1 && ne3 == 1 &&
         src1->ne[0] == 2048 && src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
@@ -85,6 +120,9 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
         const int is_hart1 = get_hart_id() & 1;
         const int32_t start = is_hart1 ? 1024 : 0;
         const float* src_ptr = src0_data + start;
+        const float* add_src_ptr = fused_add ? add_src_data + start : 0;
+        float* add_dst_ptr = fused_add ? add_dst_data + start : 0;
+        const float* norm_ptr = fused_add ? add_dst_ptr : src_ptr;
         const float* wgt_ptr = src1_data + start;
         float* dst_ptr = dst_data + start;
 
@@ -95,14 +133,30 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
         float zero = 0.0f;
         __asm__ volatile("fbc.ps f10, %[z]\n" : : [z] "m"(zero) : "f10");
 
-        for (int32_t i0 = 0; i0 < 1024; i0 += 8) {
-            __asm__ volatile(
-                "flw.ps f11, %[x_vec]\n"
-                "fmadd.ps f10, f11, f11, f10\n"
-                :
-                : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0])
-                : "f10", "f11"
-            );
+        if (fused_add) {
+            for (int32_t i0 = 0; i0 < 1024; i0 += 8) {
+                __asm__ volatile(
+                    "flw.ps f11, %[x_vec]\n"
+                    "flw.ps f12, %[add_vec]\n"
+                    "fadd.ps f11, f11, f12, rne\n"
+                    "fsw.ps f11, %[add_result]\n"
+                    "fmadd.ps f10, f11, f11, f10\n"
+                    : [add_result] "=m"(*(float(*)[8])&add_dst_ptr[i0])
+                    : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0]),
+                      [add_vec] "m"(*(const float(*)[8])&add_src_ptr[i0])
+                    : "f10", "f11", "f12"
+                );
+            }
+        } else {
+            for (int32_t i0 = 0; i0 < 1024; i0 += 8) {
+                __asm__ volatile(
+                    "flw.ps f11, %[x_vec]\n"
+                    "fmadd.ps f10, f11, f11, f10\n"
+                    :
+                    : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0])
+                    : "f10", "f11"
+                );
+            }
         }
 
         float partial;
@@ -167,7 +221,7 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
                 "fmul.ps f14, f14, f15\n"
                 "fsw.ps f14, %[result]\n"
                 : [result] "=m"(*(float(*)[8])&dst_ptr[i0])
-                : [x_vec] "m"(*(const float(*)[8])&src_ptr[i0]),
+                : [x_vec] "m"(*(const float(*)[8])&norm_ptr[i0]),
                   [scale_ptr] "m"(scale),
                   [w_vec] "m"(*(const float(*)[8])&wgt_ptr[i0])
                 : "f12", "f13", "f14", "f15"
@@ -175,6 +229,10 @@ int entry_point(struct ggml_et_rms_norm_mul_params* params, void* env) {
         }
 
         return 0;
+    }
+
+    if (fused_add) {
+        return -1;
     }
 
     // RMS norm processes rows independently

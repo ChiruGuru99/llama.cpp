@@ -580,6 +580,66 @@ static bool ggml_et_can_fuse(const struct ggml_cgraph * cgraph, int node_idx,
     return true;
 }
 
+static bool ggml_et_can_fuse_add_rms_norm_mul(const struct ggml_cgraph * cgraph, int node_idx) {
+    if (!ggml_can_fuse_subgraph(cgraph, node_idx,
+            { GGML_OP_ADD, GGML_OP_RMS_NORM, GGML_OP_MUL },
+            { node_idx, node_idx + 2 })) {
+        return false;
+    }
+
+    const ggml_tensor * add      = cgraph->nodes[node_idx];
+    const ggml_tensor * rms_norm = cgraph->nodes[node_idx + 1];
+    const ggml_tensor * mul      = cgraph->nodes[node_idx + 2];
+
+    // Verify the exact ADD -> RMS_NORM -> MUL data flow.
+    const bool rms_is_src0 = mul->src[0] == rms_norm;
+    const bool rms_is_src1 = mul->src[1] == rms_norm;
+
+    if (!add->src[0] ||
+        !add->src[1] ||
+        rms_norm->src[0] != add ||
+        rms_is_src0 == rms_is_src1) {
+        return false;
+    }
+
+    const ggml_tensor * weights = rms_is_src0 ? mul->src[1] : mul->src[0];
+    if (!weights) {
+        return false;
+    }
+
+    const auto is_exact_shape = [](const ggml_tensor * tensor) {
+        return tensor->ne[0] == 2048 &&
+               tensor->ne[1] == 1 &&
+               tensor->ne[2] == 1 &&
+               tensor->ne[3] == 1;
+    };
+
+    // First experiment: F32 contiguous [2048, 1, 1, 1] residual path.
+    if (add->src[0]->type != GGML_TYPE_F32 ||
+        add->src[1]->type != GGML_TYPE_F32 ||
+        add->type != GGML_TYPE_F32 ||
+        rms_norm->type != GGML_TYPE_F32 ||
+        mul->type != GGML_TYPE_F32 ||
+        weights->type != GGML_TYPE_F32 ||
+        !is_exact_shape(add->src[0]) ||
+        !is_exact_shape(add->src[1]) ||
+        !is_exact_shape(add) ||
+        !is_exact_shape(rms_norm) ||
+        !is_exact_shape(mul) ||
+        weights->ne[0] != 2048 ||
+        ggml_nelements(weights) != 2048 ||
+        !ggml_is_contiguous(add->src[0]) ||
+        !ggml_is_contiguous(add->src[1]) ||
+        !ggml_is_contiguous(add) ||
+        !ggml_is_contiguous(rms_norm) ||
+        !ggml_is_contiguous(mul) ||
+        !ggml_is_contiguous_rows(weights)) {
+        return false;
+    }
+
+    return true;
+}
+
 static bool ggml_et_can_fuse_rope_set_rows(const struct ggml_cgraph * cgraph, int node_idx) {
     if (!ggml_can_fuse_subgraph(cgraph, node_idx,
             { GGML_OP_ROPE, GGML_OP_VIEW, GGML_OP_SET_ROWS },
@@ -661,6 +721,20 @@ static enum ggml_status ggml_backend_et_graph_compute(ggml_backend_t backend, gg
         }
 
         // --- Fusion checks (before regular dispatch) ---
+        if (ggml_et_can_fuse_add_rms_norm_mul(cgraph, i)) {
+            ggml_tensor * add      = cgraph->nodes[i];
+            ggml_tensor * rms_norm = cgraph->nodes[i + 1];
+            ggml_tensor * mul      = cgraph->nodes[i + 2];
+
+            if (!ggml_et_op_add_rms_norm_mul(dev_ctx, add, rms_norm, mul)) {
+                GGML_LOG_ERROR("ET: Failed to launch fused ADD + RMS_NORM + MUL operation");
+                return GGML_STATUS_FAILED;
+            }
+
+            i += 2;  // skip the RMS_NORM and MUL nodes
+            continue;
+        }
+
         if (ggml_et_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
             ggml_et_op_rms_norm_mul(dev_ctx, node, cgraph->nodes[i + 1]);
             i++;  // skip the MUL node

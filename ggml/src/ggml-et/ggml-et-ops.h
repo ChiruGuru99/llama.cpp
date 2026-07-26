@@ -157,6 +157,9 @@ struct ggml_et_rms_norm_mul_params {
     ggml_tensor src1;      // F32 weights tensor (element-wise multiply)
     ggml_tensor dst;       // F32 output tensor
     float eps;             // Epsilon for numerical stability
+    ggml_tensor add_src;   // Optional F32 ADD second input
+    ggml_tensor add_dst;   // Optional F32 materialized ADD output
+    int32_t fused_add;     // Non-zero for fused ADD -> RMS_NORM -> MUL
 };
 
 struct ggml_et_mul_mat_id_params {
@@ -196,3 +199,7 @@ bool ggml_et_op_elmap(ggml_backend_et_device_context* dev_ctx, const ggml_tensor
 bool ggml_et_op_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
                              const ggml_tensor* rms_norm_node,
                              const ggml_tensor* mul_node);
+bool ggml_et_op_add_rms_norm_mul(ggml_backend_et_device_context* dev_ctx,
+                                 const ggml_tensor* add_node,
+                                 const ggml_tensor* rms_norm_node,
+                                 const ggml_tensor* mul_node);
